@@ -25,6 +25,8 @@
 #include <libsc/tsl1401cl.h>
 #include <libsc/futaba_s3010.h>
 #include <cstdio>
+#include <iostream>
+#include <string>
 #include <libbase/k60/gpio.h>
 #include <math.h>
 #include <stdio.h>
@@ -74,13 +76,18 @@ Tsl1401cl *ccd_up = 0;
 Tsl1401cl *ccd_down = 0;
 libsc::k60::JyMcuBt106 *bluetooth = 0;
 uint16_t mid_angle=1050; //[600,1500]
-uint16_t angle;
+uint16_t angle =1050;;
 Motor *mot=0;
 AlternateMotor *altmotor =0;
 std::array<uint16_t, Tsl1401cl::kSensorW> Data;
+std::array<uint16_t, Tsl1401cl::kSensorW> preprepreData;
+std::array<uint16_t, Tsl1401cl::kSensorW> prepreData;
+std::array<uint16_t, Tsl1401cl::kSensorW> prevData;
+uint16_t ccd_count;
 uint16_t speed;
 uint16_t color;
 uint16_t color2 = 0xFFE0;
+uint16_t feedback, preError;
 int16_t error;
 bool ispressed = false;
 bool motorenabled = false;
@@ -94,6 +101,9 @@ void print_ccd(uint16_t);
 void changespeed(uint16_t);
 void configuration(void);
 void check_joystick(void);
+void ledge(void);
+void redge(void);
+
 
 int main(void)
 {
@@ -119,23 +129,58 @@ int main(void)
 	char ccd_buf[50];
 	char ano[30];
 	libsc::Lcd::Rect ha;
+	ccd_count=0;
+
+	if(angle!=1300){
+		angle=1300;
+		servo->SetDegree(angle);
+	}
+
 
 	while(1){
 		if(t != System::Time()){
 			t=System::Time();
-			lcd->Clear();
+			//lcd->Clear();
 			//sprintf(buffer, "%d",System::Time());
 			if (t%10 == 0){
 				check_joystick();
 				//**check if need inline here
 			}
+
 			if (t%20==0){
 				lcd->Clear();
 				ccd_up->StartSample();
 				while(!ccd_up->SampleProcess()){};
 				Data = ccd_up->GetData();
+				//turn();
+//				if (ccd_count<10){
+//					ccd_count+=1;
+//				}
 				sprintf(ccd_buf, "%d",Data[64]);
-				print_ccd(Lcd::kGreen);
+				//print_ccd(Lcd::kGreen);
+				for(uint16_t i=0; i<Tsl1401cl::kSensorW; i++){
+					lcd->SetRegion(Lcd::Rect(i, (255-Data[i])/2,1,1));
+					lcd->FillPixel(&color,1);
+				}
+				//prevData=Data;
+				/*
+				if(ccd_count<3){
+					if(ccd_count<2){
+						for (uint16_t i=0; i<Tsl1401cl::kSensorW; i++){
+							prepreData[i]=0;
+							prevData[i]=0;
+						}
+					}else{
+						for (uint16_t i=0; i<Tsl1401cl::kSensorW; i++){
+							prepreData[i]=0;
+							prevData[i]=Data[i];
+						}
+					}
+				}else{
+					prepreData = prevData;
+					prevData = Data;
+				}
+				*/
 			}
 			if(t%1000 == 0){
 				leda.Switch();
@@ -160,8 +205,9 @@ bool listener(const Byte *data, const size_t size){
 			sprintf(msg, "Motor on with power = %d\n", speed);
 			bluetooth->SendStr(msg);
 		}
+		break;
 	case '6':
-		if (motorenabled = true){
+		if (motorenabled == true){
 			speed = 0;
 			altmotor->SetPower(speed);
 			sprintf(msg,"Motor turned off");
@@ -171,20 +217,25 @@ bool listener(const Byte *data, const size_t size){
 			sprintf(msg, "Motor is already off");
 			bluetooth->SendStr(msg);
 		}
+		break;
 	case '1':
 		sprintf(msg, "Status of Motor: %d\n Speed of Motor: %d\n",motorenabled, speed);
 		bluetooth->SendStr(msg);
 		writ->WriteString(msg);
 		////**Delete the delay when writ has shown sth
 		System::DelayMs(500);
+		break;
+	default:
+	;
 
 	}
+	return true;
 }
 
 
-void print_ccd(uint16_t color){
+inline void print_ccd(uint16_t color){
 	for(uint16_t i=0; i<Tsl1401cl::kSensorW; i++){
-		lcd->SetRegion(Lcd::Rect(i, (255-Data[i])/2,1,(255-Data[i])/2));
+		lcd->SetRegion(Lcd::Rect(i, (255-Data[i])/2,1,1));
 		lcd->FillPixel(&color,1);
 	}
 	//lcd->SetRegion(Lcd::Rect(0,0,128,160));
@@ -204,8 +255,10 @@ void check_joystick(void){
 	if(!ispressed){
 		//jdown, jleft, jright, jcenter, jup;
 		if (!jdown.Get()){
-			writ->WriteString("joystick down");
-			bluetooth->SendStrLiteral("joystick down \n");
+			console->WriteString("joystick down");
+			//bluetooth->SendStrLiteral("joystick down \n");
+			lcd->SetRegion(Lcd::Rect(0,0,128,50));
+			lcd->FillColor(Lcd::kYellow);
 			ispressed = true;
 		}
 		else if (!jleft.Get()){
@@ -233,6 +286,14 @@ void check_joystick(void){
 			ispressed = false;
 		}
 	}
+}
+
+void ledge(void){
+
+}
+
+void redge(void){
+
 }
 
 void region_set(libsc::Lcd::Rect &ha,int x, uint16_t y,int w,int h){
@@ -289,7 +350,7 @@ void configuration(void){
 
 	//LCD
 	St7735r::Config config;
-	config.is_revert = false;
+	config.is_revert = true;
 	config.is_bgr = false;
 	lcd = new St7735r(config);
 	lcd->SetRegion(Lcd::Rect(0,0,128,160));
@@ -307,6 +368,7 @@ void configuration(void){
 	//Lcd *ylcd;
 	tryy.lcd = lcd;
 	console = new LcdConsole(tryy);
+
 	//LcdConsole console(tryy);		//this one s not pointer
 
 	////LCD TYPEWRITER
