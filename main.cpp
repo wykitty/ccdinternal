@@ -71,12 +71,12 @@ St7735r *lcd = 0;
 St7735r::Rect rect_1, rect_2, rect_3, rect_4;
 LcdTypewriter *writ = 0;
 LcdConsole *console = 0;
-FutabaS3010 *servo = 0;
+FutabaS3010 *servo = 0;     //500-1300
 Tsl1401cl *ccd_up = 0;
 Tsl1401cl *ccd_down = 0;
 libsc::k60::JyMcuBt106 *bluetooth = 0;
 uint16_t mid_angle=1050; //[600,1500]
-uint16_t angle =1050;;
+uint16_t angle =500;
 Motor *mot=0;
 AlternateMotor *altmotor =0;
 std::array<uint16_t, Tsl1401cl::kSensorW> Data;
@@ -85,10 +85,20 @@ std::array<uint16_t, Tsl1401cl::kSensorW> prepreData;
 std::array<uint16_t, Tsl1401cl::kSensorW> prevData;
 uint16_t ccd_count;
 uint16_t speed;
-uint16_t color;
+uint16_t errors, feedbkerror;
+int errl[2]={0,0};
+int xr[2] = {0,0};
+int xl[2] = {0,0};
+int errr[2]={0,0};
+double kp,ki,kd;
+uint16_t color = 0xFFFF;
+uint16_t mid;
 uint16_t color2 = 0xFFE0;
 uint16_t feedback, preError;
-int16_t error;
+int16_t sumerror=0;
+int16_t error=0;
+int16_t preverror=0;
+
 bool ispressed = false;
 bool motorenabled = false;
 
@@ -100,7 +110,12 @@ void print_info(uint16_t);
 void print_ccd(uint16_t);
 void changespeed(uint16_t);
 void configuration(void);
+void ccdbuffer(void);
 void check_joystick(void);
+void checkangle(void);
+void speedPID(void);
+void turnPID(void);
+void detmid(void);
 void ledge(void);
 void redge(void);
 
@@ -128,41 +143,52 @@ int main(void)
 	char buffer[33];
 	char ccd_buf[50];
 	char ano[30];
-	libsc::Lcd::Rect ha;
+	//libsc::Lcd::Rect ha;
 	ccd_count=0;
 
-	if(angle!=1300){
-		angle=1300;
-		servo->SetDegree(angle);
-	}
-
+	kp = 0;
+	ki = 0;
+	kd = 0;
 
 	while(1){
 		if(t != System::Time()){
 			t=System::Time();
-			//lcd->Clear();
 			//sprintf(buffer, "%d",System::Time());
-			if (t%10 == 0){
-				check_joystick();
-				//**check if need inline here
-			}
 
-			if (t%20==0){
-				lcd->Clear();
+			if (t%10==0){
+				//check_joystick();
 				ccd_up->StartSample();
 				while(!ccd_up->SampleProcess()){};
 				Data = ccd_up->GetData();
-				//turn();
-//				if (ccd_count<10){
+//				sprintf(ccd_buf, "%d", Data[64]);
+//				writ->WriteString("midno:");
+//				writ->WriteString(ccd_buf);
+
+//				if(ccd_count==0){
+//					break;
+//				}
+				//Data = ccd_up->GetData();
+//				if(ccd_count<3){
 //					ccd_count+=1;
 //				}
-				sprintf(ccd_buf, "%d",Data[64]);
-				//print_ccd(Lcd::kGreen);
+				ledge();
+				redge();
+				detmid();
+				turnPID();
+				/*
+				for (uint16_t q=0; q<Tsl1401cl::kSensorW; q++){
+					Data[q] = (prevData[q]*0.3 + Data[q]*0.7);
+				}
+				*/
+				//print_ccd(Lcd::kWhite);
+
 				for(uint16_t i=0; i<Tsl1401cl::kSensorW; i++){
-					lcd->SetRegion(Lcd::Rect(i, (255-Data[i])/2,1,1));
+					lcd->SetRegion(Lcd::Rect(i, (255-Data[i])/2.0,1,1));
 					lcd->FillPixel(&color,1);
 				}
-				//prevData=Data;
+
+				//std::copy(Data, Data+Tsl1401cl::kSensorW, prevData);
+
 				/*
 				if(ccd_count<3){
 					if(ccd_count<2){
@@ -181,8 +207,15 @@ int main(void)
 					prevData = Data;
 				}
 				*/
+				System::DelayMs(5);
+
+				for(uint16_t i=0; i<Tsl1401cl::kSensorW; i++){
+					lcd->SetRegion(Lcd::Rect(i, (255-Data[i])/2.0,1,1));
+					lcd->FillColor(libsc::Lcd::kBlack);
+				}
 			}
 			if(t%1000 == 0){
+				console->Clear(1);
 				leda.Switch();
 				ledb.Switch();
 			}
@@ -223,7 +256,7 @@ bool listener(const Byte *data, const size_t size){
 		bluetooth->SendStr(msg);
 		writ->WriteString(msg);
 		////**Delete the delay when writ has shown sth
-		System::DelayMs(500);
+		//System::DelayMs(500);
 		break;
 	default:
 	;
@@ -233,9 +266,9 @@ bool listener(const Byte *data, const size_t size){
 }
 
 
-inline void print_ccd(uint16_t color){
+void print_ccd(uint16_t color){
 	for(uint16_t i=0; i<Tsl1401cl::kSensorW; i++){
-		lcd->SetRegion(Lcd::Rect(i, (255-Data[i])/2,1,1));
+		lcd->SetRegion(Lcd::Rect(i, (255-Data[i])/2.0 ,1,1));
 		lcd->FillPixel(&color,1);
 	}
 	//lcd->SetRegion(Lcd::Rect(0,0,128,160));
@@ -251,34 +284,39 @@ void print_info(uint16_t color2){
 	}
 }
 
+void ccdbuffer(void){
+
+}
+
 void check_joystick(void){
 	if(!ispressed){
+		console->Clear(1);
 		//jdown, jleft, jright, jcenter, jup;
 		if (!jdown.Get()){
 			console->WriteString("joystick down");
 			//bluetooth->SendStrLiteral("joystick down \n");
-			lcd->SetRegion(Lcd::Rect(0,0,128,50));
-			lcd->FillColor(Lcd::kYellow);
+			//lcd->SetRegion(Lcd::Rect(0,0,128,50));
+			//lcd->FillColor(Lcd::kYellow);
 			ispressed = true;
 		}
 		else if (!jleft.Get()){
-			writ->WriteString("joystick left");
-			bluetooth->SendStrLiteral("joystick left \n");
+			console->WriteString("joystick left");
+			//bluetooth->SendStrLiteral("joystick left \n");
 			ispressed = true;
 		}
 		else if (!jright.Get()){
-			writ->WriteString("joystick right");
-			bluetooth->SendStrLiteral("joystick right \n");
+			console->WriteString("joystick right");
+			//bluetooth->SendStrLiteral("joystick right \n");
 			ispressed = true;
 		}
 		else if (!jcenter.Get()){
-			writ->WriteString("joystick center");
-			bluetooth->SendStrLiteral("joystick center \n");
+			console->WriteString("joystick center");
+			//bluetooth->SendStrLiteral("joystick center \n");
 			ispressed = true;
 		}
 		else if (!jup.Get()){
-			writ->WriteString("joystick up");
-			bluetooth->SendStrLiteral("joystick up \n");
+			console->WriteString("joystick up");
+			//bluetooth->SendStrLiteral("joystick up \n");
 			ispressed = true;
 		}
 	}else{
@@ -288,12 +326,71 @@ void check_joystick(void){
 	}
 }
 
-void ledge(void){
+void checkangle(void){
+	angle = (angle < 500) ? 500 : (angle > 1250) ? 1250 : angle;
+}
 
+
+void ledge(void){
+	errl[0]=0;
+	//char edg[30];
+	for(uint16_t i=Tsl1401cl::kSensorW/2; i<Tsl1401cl::kSensorW; i++){
+		int j= i+4;
+		errl[1]=errl[0];
+		xl[1]=j;
+		if((Data[j]-Data[i])>errl[0]){
+			errl[0] = Data[j]-Data[i];
+			xl[0]=j-2;
+		}
+	}
+	//sprintf(edg, "%d",xl[0]);
+	//console->WriteString("left:");
+	//console->WriteString(edg);
 }
 
 void redge(void){
+	errr[0]=0;
+	char edg[30];
+	for(uint16_t i=0; i<Tsl1401cl::kSensorW/2; i++){
+		int j = i+4;
+		errr[1]=errr[0];
+		xr[1]=j;
+		if((Data[j]-Data[i])>errr[0]){
+			errr[0] = Data[j]-Data[i];
+			xr[0]=j+2;
+		}
+	}
+	//sprintf(edg, "%d", xr[0]);
+	//console->WriteString("right:");
+	//console->WriteString(edg);
+}
 
+void detmid(void){
+	char mil[30];
+	mid=(xr[0]+xl[0])/2;
+	//sprintf(mil, "%d", mid);
+	//console->WriteString(mil);
+}
+
+void turnPID(void){
+	kp=0.6;
+	ki=0.2;
+	sumerror=sumerror+error;
+	char ang[30];
+	uint16_t turn = angle;
+	error= mid-Tsl1401cl::kSensorW/2;
+	//preverror=
+	if(mid>64){
+		turn = 900 + (uint16_t)(kp*error + ki*sumerror + kd*(preverror-error));
+	}else{
+		turn = 900 - (uint16_t)(kp*error + ki*sumerror + kd*(preverror-error));
+	}
+	angle = turn;
+	checkangle();
+	servo->SetDegree(angle);
+	//sprintf(ang, "%d", angle);
+	//console->WriteString("turn");
+	//console->WriteString(ang);
 }
 
 void region_set(libsc::Lcd::Rect &ha,int x, uint16_t y,int w,int h){
@@ -316,6 +413,11 @@ void turn(void){
 		servo->SetDegree(angle);
 	}
 }
+
+void speedPID(void){
+
+}
+
 
 void changespeed(uint16_t speed){
 	speed = (speed > 400) ? 400: speed;
@@ -353,18 +455,14 @@ void configuration(void){
 	config.is_revert = true;
 	config.is_bgr = false;
 	lcd = new St7735r(config);
-	lcd->SetRegion(Lcd::Rect(0,0,128,160));
+	//lcd->SetRegion(Lcd::Rect(0,0,128,160));
 	lcd->FillColor(Lcd::kBlack);
 
 	////LCD CONSOLE
 	libsc::LcdConsole::Config tryy;
-	for(uint16_t i=0; i<128; i++){
-		tryy.region = Lcd::Rect(i,80,1,1);
-		//tryy.region(Lcd::Rect(i,80,1,1));
-	}
 	tryy.bg_color = 0;
 	tryy.lcd = lcd;
-	tryy.text_color = -1;
+	tryy.text_color = 0xFFFF;
 	//Lcd *ylcd;
 	tryy.lcd = lcd;
 	console = new LcdConsole(tryy);
@@ -373,6 +471,7 @@ void configuration(void){
 
 	////LCD TYPEWRITER
 	LcdTypewriter::Config writert;
+	//writert.text_color = WHITE;
 	writert.lcd= lcd;
 	writert.is_text_wrap = true;
 	writ = new LcdTypewriter(writert);
@@ -393,6 +492,7 @@ void configuration(void){
 	altmotor->SetPower(speed);
 	motorenabled = false;
 
+	/*
 	//BLUETOOTH
 	libsc::k60::JyMcuBt106::Config bluetooth_config;
 	bluetooth_config.id = 0;
@@ -400,5 +500,6 @@ void configuration(void){
 	bluetooth_config.tx_buf_size = 200;
 	bluetooth_config.rx_isr = listener;
 	bluetooth = new libsc::k60::JyMcuBt106(bluetooth_config);
+	*/
 }
 
